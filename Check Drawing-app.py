@@ -89,7 +89,7 @@ def analyze_with_retry(client, model, contents, config, max_retries=4, initial_d
             if any(code in err_msg for code in ["503", "429", "UNAVAILABLE", "high demand"]):
                 if attempt < max_retries:
                     time.sleep(delay)
-                    delay *= 12  # ทวีคูณเวลารอ 3s -> 6s -> 12s
+                    delay *= 3  # ทวีคูณเวลารอ 3s -> 6s -> 12s
                     continue
             raise last_error
     raise last_error
