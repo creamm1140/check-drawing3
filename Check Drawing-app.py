@@ -1,113 +1,170 @@
+import streamlit as st
 import io
 import json
-import os
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import StreamingResponse
+import time
 import fitz  # PyMuPDF
 from PIL import Image, ImageDraw, ImageFont
 from google import genai
 from google.genai import types
 
-app = FastAPI()
+# ตั้งค่าหน้าเว็บ
+st.set_page_config(page_title="AI ตรวจแบบแปลนชลประทาน", layout="wide")
 
-# สมัครรับ API Key ฟรีได้ที่ https://aistudio.google.com/
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+st.title("🚜 AI ตรวจสอบแบบแปลนวิศวกรรมชลประทาน")
+st.caption("ระบบตรวจสอบมิติโครงสร้าง, ชลศาสตร์, สัญลักษณ์ และคำผิด อัตโนมัติ (Powered by Gemini Free API)")
 
+# ----------------- ส่วนจัดการ API KEY -----------------
+with st.sidebar:
+    st.header("⚙️ การตั้งค่า")
+    # ดึงค่าจาก Streamlit secrets ถ้ามี หรือให้ผู้ใช้กรอก
+    default_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
+    api_key = st.text_input("Gemini API Key (Google AI Studio):", value=default_key, type="password")
+    st.markdown("[👉 รับ API Key ฟรีที่นี่](https://aistudio.google.com/)")
+
+if not api_key:
+    st.warning("⚠️ กรุณากรอก Gemini API Key ในแถบด้านซ้ายก่อนเริ่มใช้งาน")
+    st.stop()
+
+# สร้าง Client
+try:
+    client = genai.Client(api_key=api_key)
+except Exception as e:
+    st.error(f"เกิดข้อผิดพลาดในการเชื่อมต่อ Gemini API: {e}")
+    st.stop()
+
+# ----------------- ฟังก์ชันช่วยประมวลผล -----------------
 PROMPT = """
-คุณคือวิศวกรชลประทานผู้เชี่ยวชาญ ตรวจสอบแบบแปลนนี้อย่างละเอียด:
-1. มิติโครงสร้าง (Dimensions & Scale)
-2. สัญลักษณ์และความถูกต้องตามหลักชลศาสตร์ (Hydraulics & Levels)
-3. คำผิด/ตัวสะกด (ภาษาไทยและอังกฤษ)
+คุณคือวิศวกรผู้เชี่ยวชาญด้านการตรวจสอบแบบแปลนวิศวกรรมชลประทานและโครงสร้างอาคารชลประทาน
+จงตรวจสอบแบบแปลนในภาพนี้อย่างละเอียด:
+1. มิติโครงสร้าง (Dimensions): ตัวเลขระยะ ความสูง ความกว้าง ขัดแย้งหรือไม่
+2. หลักวิศวกรรมชลประทาน (Hydraulics): ระดับน้ำ (ร.น.ส., ร.ม.ส.), ทิศทางการไหล, สโลป, สันฝาย, ท่อลอด, ทรบ.
+3. โครงสร้างและวัสดุ: ระยะเหล็ก, รอยต่อ, สัญลักษณ์
+4. คำผิด/คำตกหล่น (ภาษาไทยและอังกฤษ)
 
-ส่งผลลัพธ์เป็น JSON Array เท่านั้น ในรูปแบบ:
+ตอบกลับเป็น JSON Array เท่านั้น ในรูปแบบ:
 [
   {
     "box_2d": [ymin, xmin, ymax, xmax],
     "type": "error" หรือ "observation",
-    "title": "หัวข้อ",
-    "description": "คำอธิบาย"
+    "title": "หัวข้อจุดที่พบ",
+    "description": "คำอธิบายข้อผิดพลาดหรือข้อสังเกต"
   }
 ]
-พิกัด box_2d ใช้สเกล 0 ถึง 1000
+* หมายเหตุ: box_2d ใช้สัดส่วน 0 ถึง 1000
 """
 
 def annotate_image(image: Image.Image, findings: list) -> Image.Image:
-    """วาดกรอบสีแดงและข้อความโน้ตลงบนภาพ"""
-    draw = ImageDraw.Draw(image)
-    width, height = image.size
+    """วาดกรอบสีแดง/ส้มและโน้ตลงบนภาพ"""
+    draw_img = image.copy()
+    draw = ImageDraw.Draw(draw_img)
+    w, h = draw_img.size
 
     for idx, item in enumerate(findings, start=1):
         box = item.get("box_2d", [])
         if len(box) == 4:
             ymin, xmin, ymax, xmax = box
-            # แปลงสัดส่วน 0-1000 เป็นพิกัดจริงบนภาพ
-            left = (xmin / 1000) * width
-            top = (ymin / 1000) * height
-            right = (xmax / 1000) * width
-            bottom = (ymax / 1000) * height
+            left = (xmin / 1000) * w
+            top = (ymin / 1000) * h
+            right = (xmax / 1000) * w
+            bottom = (ymax / 1000) * h
 
-            color = "red" if item.get("type") == "error" else "orange"
+            is_error = item.get("type") == "error"
+            color = "red" if is_error else "orange"
 
-            # วาดกรอบสี่เหลี่ยม/วงกลมเน้นจุดผิด
-            draw.rectangle([left, top, right, bottom], outline=color, width=4)
+            # วาดกรอบสี่เหลี่ยมเน้นจุดผิด
+            draw.rectangle([left, top, right, bottom], outline=color, width=5)
             
-            # วาดป้ายข้อสังเกต (Badge & Text)
-            label = f"#{idx} [{item.get('title')}]: {item.get('description')}"
-            draw.rectangle([left, max(0, top - 25), left + len(label) * 8, top], fill=color)
-            draw.text((left + 5, max(0, top - 20)), label, fill="white")
+            # วาดป้ายข้อความกำกับ
+            tag = f"#{idx} {item.get('title', '')}"
+            draw.rectangle([left, max(0, top - 25), left + len(tag) * 12, top], fill=color)
+            draw.text((left + 5, max(0, top - 20)), tag, fill="white")
 
-    return image
+    return draw_img
 
-@app.post("/audit-drawing/")
-async def audit_drawing(file: UploadFile = File(...)):
-    file_bytes = await file.read()
-    annotated_images = []
+# ----------------- ส่วน UI อัปโหลด -----------------
+uploaded_file = st.file_uploader(
+    "📁 อัปโหลดแบบแปลน (รองรับ PDF, JPG, PNG, TIFF):", 
+    type=["pdf", "jpg", "jpeg", "png", "tiff"]
+)
 
-    # 1. แปลงไฟล์เข้าสู่รูปภาพแต่ละหน้า (รองรับทั้ง PDF, PNG, JPG)
-    if file.filename.lower().endswith(".pdf"):
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        pages = []
-        for page in doc:
-            pix = page.get_pixmap(dpi=200) # ปรับ DPI ให้คมชัดพอที่ AI จะอ่านแบบได้
-            img = Image.open(io.BytesIO(pix.tobytes("png")))
-            pages.append(img)
-    else:
-        pages = [Image.open(io.BytesIO(file_bytes)).convert("RGB")]
+if uploaded_file and st.button("🚀 เริ่มการตรวจสอบ (Start Audit)"):
+    file_bytes = uploaded_file.read()
+    raw_pages = []
 
-    # 2. ให้ AI ตรวจทีละหน้า
-    for page_img in pages:
-        # บีบอัดชั่วคราวเพื่อส่งเข้า Gemini
-        img_byte_arr = io.BytesIO()
-        page_img.save(img_byte_arr, format='JPEG')
-        
-        response = client.models.generate_content(
-            model='gemini-2.0-flash', # หรือ gemini-1.5-flash (ฟรี)
-            contents=[
-                types.Part.from_bytes(data=img_byte_arr.getvalue(), mime_type='image/jpeg'),
-                PROMPT
-            ],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
+    with st.spinner("กำลังแปลงไฟล์เป็นรูปภาพ..."):
+        if uploaded_file.name.lower().endswith(".pdf"):
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            for page in doc:
+                pix = page.get_pixmap(dpi=150)
+                raw_pages.append(Image.open(io.BytesIO(pix.tobytes("png"))))
+        else:
+            raw_pages.append(Image.open(io.BytesIO(file_bytes)).convert("RGB"))
+
+    st.info(f"ตรวจพบทั้งหมด {len(raw_pages)} หน้า กำลังส่งให้ AI ตรวจสอบทีละหน้า...")
+
+    annotated_pages = []
+    all_findings = []
+
+    progress_bar = st.progress(0)
+    for idx, page_img in enumerate(raw_pages):
+        # แปลงเป็น Bytes ส่งให้ Gemini
+        img_buffer = io.BytesIO()
+        page_img.save(img_buffer, format="JPEG", quality=90)
         
         try:
+            response = client.models.generate_content(
+                model="gemini-2.0-flash", # หรือ gemini-1.5-flash
+                contents=[
+                    types.Part.from_bytes(data=img_buffer.getvalue(), mime_type="image/jpeg"),
+                    PROMPT
+                ],
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
             findings = json.loads(response.text)
-        except Exception:
+        except Exception as e:
+            st.error(f"เกิดข้อผิดพลาดในหน้า {idx + 1}: {e}")
             findings = []
 
-        # 3. วาดผลการตรวจสอบลงบนหน้าแบบแปลน
-        annotated_img = annotate_image(page_img.copy(), findings)
-        annotated_images.append(annotated_img)
+        # มาร์กเกอร์จุดผิดลงบนภาพ
+        annotated_img = annotate_image(page_img, findings)
+        annotated_pages.append(annotated_img)
+        all_findings.append(findings)
 
-    # 4. รวมหน้าทั้งหมดกลับเป็น PDF ส่งให้ดาวน์โหลด
+        progress_bar.progress((idx + 1) / len(raw_pages))
+        time.sleep(1) # ป้องกัน Rate Limit ของ Free Tier
+
+    st.success("✅ ตรวจสอบแบบแปลนเสร็จสิ้น!")
+
+    # ----------------- แสดงผลลัพธ์ทีละหน้า -----------------
+    st.subheader("📋 ผลการตรวจสอบแต่ละหน้า")
+    for i, (ann_img, page_finds) in enumerate(zip(annotated_pages, all_findings)):
+        with st.expander(f"📄 หน้าที่ {i + 1} (พบ {len(page_finds)} รายการ)", expanded=(i == 0)):
+            col1, col2 = st.columns([3, 2])
+            
+            with col1:
+                st.image(ann_img, use_container_width=True, caption=f"ภาพผลการตรวจหน้าที่ {i + 1}")
+            
+            with col2:
+                st.markdown("#### รายการข้อสังเกต/จุดผิดพลาด:")
+                if not page_finds:
+                    st.write("🟢 ไม่พบข้อผิดพลาดที่ชัดเจนในหน้านี้")
+                for f_idx, item in enumerate(page_finds, start=1):
+                    badge = "🔴 ผิดพลาด (Error)" if item.get("type") == "error" else "🟠 ข้อสังเกต (Observation)"
+                    st.markdown(f"**#{f_idx} [{badge}] {item.get('title')}**")
+                    st.write(item.get("description"))
+                    st.divider()
+
+    # ----------------- ปุ่มดาวน์โหลด PDF รวมผล -----------------
     output_pdf = io.BytesIO()
-    if annotated_images:
-        first_img = annotated_images[0]
-        rest_imgs = annotated_images[1:]
-        first_img.save(output_pdf, format="PDF", save_all=True, append_images=rest_imgs)
+    if annotated_pages:
+        annotated_pages[0].save(
+            output_pdf, format="PDF", save_all=True, append_images=annotated_pages[1:]
+        )
         output_pdf.seek(0)
 
-    return StreamingResponse(
-        output_pdf,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename=Audited_{file.filename}.pdf"}
-    )
+        st.download_button(
+            label="📥 ดาวน์โหลดไฟล์แบบแปลนที่มีการวงจุดผิด (Annotated PDF)",
+            data=output_pdf,
+            file_name=f"Audited_{uploaded_file.name}.pdf",
+            mime="application/pdf"
+        )
