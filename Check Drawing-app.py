@@ -3,7 +3,7 @@ import io
 import json
 import time
 import fitz  # PyMuPDF
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from google import genai
 from google.genai import types
 
@@ -11,15 +11,22 @@ from google.genai import types
 st.set_page_config(page_title="AI ตรวจแบบแปลนชลประทาน", layout="wide")
 
 st.title("🚜 AI ตรวจสอบแบบแปลนวิศวกรรมชลประทาน")
-st.caption("ระบบตรวจสอบมิติโครงสร้าง, ชลศาสตร์, สัญลักษณ์ และคำผิด อัตโนมัติ (Powered by Gemini Free API)")
+st.caption("ระบบตรวจสอบมิติโครงสร้าง, ชลศาสตร์, สัญลักษณ์ และคำผิด อัตโนมัติ")
 
-# ----------------- ส่วนจัดการ API KEY -----------------
+# ----------------- ส่วนจัดการแถบด้านข้าง (Sidebar) -----------------
 with st.sidebar:
-    st.header("⚙️ การตั้งค่า")
-    # ดึงค่าจาก Streamlit secrets ถ้ามี หรือให้ผู้ใช้กรอก
+    st.header("⚙️ การตั้งค่าระบบ")
     default_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
-    api_key = st.text_input("Gemini API Key (Google AI Studio):", value=default_key, type="password")
-    st.markdown("[👉 รับ API Key ฟรีที่นี่](https://aistudio.google.com/)")
+    api_key = st.text_input("Gemini API Key:", value=default_key, type="password")
+    
+    # เลือกรุ่นโมเดล (ใช้ gemini-3.8-flash เป็นค่าเริ่มต้น)
+    selected_model = st.selectbox(
+        "เลือกรุ่นโมเดล AI:",
+        ["gemini-3.8-flash", "gemini-3.5-flash-lite"],
+        index=0,
+        help="gemini-3.8-flash เป็นโมเดลที่แนะนำและรองรับการตรวจแบบแปลนความละเอียดสูงได้ดีที่สุด"
+    )
+    st.markdown("[👉 สมัครรับ API Key ฟรีที่นี่](https://aistudio.google.com/)")
 
 if not api_key:
     st.warning("⚠️ กรุณากรอก Gemini API Key ในแถบด้านซ้ายก่อนเริ่มใช้งาน")
@@ -50,7 +57,7 @@ PROMPT = """
     "description": "คำอธิบายข้อผิดพลาดหรือข้อสังเกต"
   }
 ]
-* หมายเหตุ: box_2d ใช้สัดส่วน 0 ถึง 1000
+* หมายเหตุ: box_2d ต้องเป็นพิกัดสัดส่วน 0 ถึง 1000
 """
 
 def annotate_image(image: Image.Image, findings: list) -> Image.Image:
@@ -107,13 +114,13 @@ if uploaded_file and st.button("🚀 เริ่มการตรวจสอ�
 
     progress_bar = st.progress(0)
     for idx, page_img in enumerate(raw_pages):
-        # แปลงเป็น Bytes ส่งให้ Gemini
         img_buffer = io.BytesIO()
         page_img.save(img_buffer, format="JPEG", quality=90)
         
         try:
+            # เรียกใช้โมเดลตามที่เลือกจาก Sidebar
             response = client.models.generate_content(
-                model="gemini-2.0-flash", # หรือ gemini-1.5-flash
+                model=selected_model,
                 contents=[
                     types.Part.from_bytes(data=img_buffer.getvalue(), mime_type="image/jpeg"),
                     PROMPT
@@ -122,16 +129,15 @@ if uploaded_file and st.button("🚀 เริ่มการตรวจสอ�
             )
             findings = json.loads(response.text)
         except Exception as e:
-            st.error(f"เกิดข้อผิดพลาดในหน้า {idx + 1}: {e}")
+            st.error(f"เกิดข้อผิดพลาดในหน้าที่ {idx + 1}: {e}")
             findings = []
 
-        # มาร์กเกอร์จุดผิดลงบนภาพ
         annotated_img = annotate_image(page_img, findings)
         annotated_pages.append(annotated_img)
         all_findings.append(findings)
 
         progress_bar.progress((idx + 1) / len(raw_pages))
-        time.sleep(1) # ป้องกัน Rate Limit ของ Free Tier
+        time.sleep(1)
 
     st.success("✅ ตรวจสอบแบบแปลนเสร็จสิ้น!")
 
