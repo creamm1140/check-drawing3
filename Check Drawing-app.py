@@ -10,37 +10,33 @@ from PIL import Image, ImageDraw, ImageFont
 from google import genai
 from google.genai import types
 
-# ----------------- ตั้งค่าหน้าเว็บ -----------------
 st.set_page_config(
-    page_title="AI ตรวจแบบแปลนวิศวกรรมชลประทาน",
+    page_title="AI ตรวจแบบแปลนวิศวกรรมชลประทาน (High Precision)",
     page_icon="🚜",
     layout="wide"
 )
 
-st.title("🚜 AI ตรวจสอบแบบแปลนวิศวกรรมชลประทาน")
-st.caption("ระบบตรวจสอบมิติโครงสร้าง, ชลศาสตร์, สัญลักษณ์ และคำผิด (รองรับภาษาไทย 100%)")
+st.title("🚜 AI ตรวจสอบแบบแปลนวิศวกรรมชลประทาน (ระบบตรวจละเอียด)")
+st.caption("เทคโนโลยี Hybrid: ตรวจ Text Layer ภาษาไทยแม่นยำ 100% ควบคู่กับ AI Vision ตรวจมิติและชลศาสตร์")
 
-# ----------------- ระบบดาวน์โหลดและโหลดฟอนต์ภาษาไทย -----------------
+# ----------------- ระบบโหลดฟอนต์ภาษาไทย -----------------
 FONT_URL = "https://github.com/google/fonts/raw/main/ofl/sarabun/Sarabun-Regular.ttf"
 FONT_PATH = "Sarabun-Regular.ttf"
 
 @st.cache_resource
 def load_thai_font(size: int = 20):
-    """ดาวน์โหลดฟอนต์ Sarabun อัตโนมัติหากยังไม่มีในระบบ เพื่อแสดงผลภาษาไทยได้ถูกต้อง"""
     if not os.path.exists(FONT_PATH):
         try:
             urllib.request.urlretrieve(FONT_URL, FONT_PATH)
         except Exception:
             pass
 
-    # 1. พยายามโหลดฟอนต์ Sarabun
     if os.path.exists(FONT_PATH):
         try:
             return ImageFont.truetype(FONT_PATH, size)
         except Exception:
             pass
 
-    # 2. สำรองสำหรับ Windows (Tahoma)
     for win_font in ["C:/Windows/Fonts/tahoma.ttf", "C:/Windows/Fonts/angsana.ttf"]:
         if os.path.exists(win_font):
             try:
@@ -48,23 +44,13 @@ def load_thai_font(size: int = 20):
             except Exception:
                 pass
 
-    # 3. สำรองสำหรับ Mac (Thonburi)
-    for mac_font in ["/System/Library/Fonts/Supplemental/Thonburi.ttc", "/Library/Fonts/Thonburi.ttc"]:
-        if os.path.exists(mac_font):
-            try:
-                return ImageFont.truetype(mac_font, size)
-            except Exception:
-                pass
-
     return ImageFont.load_default()
 
 def wrap_text_thai(text: str, font, max_width: int, draw: ImageDraw.Draw) -> list:
-    """ฟังก์ชันตัดบรรทัดภาษาไทยตามความกว้างพิกเซลจริง ป้องกันข้อความล้นกระดาษ"""
     lines = []
     current_line = ""
     for char in text:
         test_line = current_line + char
-        # คำนวณความกว้างตัวอักษรจริง
         if draw.textlength(test_line, font=font) <= max_width:
             current_line = test_line
         else:
@@ -74,19 +60,17 @@ def wrap_text_thai(text: str, font, max_width: int, draw: ImageDraw.Draw) -> lis
         lines.append(current_line)
     return lines
 
-# ----------------- เมนูแถบด้านข้าง (Sidebar) -----------------
+# ----------------- Sidebar -----------------
 with st.sidebar:
     st.header("⚙️ การตั้งค่าระบบ")
     default_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
     api_key = st.text_input("Gemini API Key:", value=default_key, type="password")
-    
     selected_model = st.selectbox(
         "เลือกรุ่นโมเดล AI:",
         ["gemini-3.8-flash", "gemini-3.5-flash-lite"],
-        index=0,
-        help="หากตัวหลักติดโควตารายวัน ระบบจะสลับไปใช้รุ่น lite สำรองให้อัตโนมัติ"
+        index=0
     )
-    st.markdown("[👉 สมัครรับ API Key ฟรีที่ Google AI Studio](https://aistudio.google.com/)")
+    st.markdown("[👉 รับ API Key ฟรีที่ Google AI Studio](https://aistudio.google.com/)")
 
 if not api_key:
     st.warning("⚠️ กรุณากรอก Gemini API Key ในแถบด้านซ้ายก่อนเริ่มใช้งาน")
@@ -98,60 +82,98 @@ except Exception as e:
     st.error(f"เกิดข้อผิดพลาดในการเชื่อมต่อ Gemini API: {e}")
     st.stop()
 
-# ----------------- Prompt ตรวจสอบ -----------------
-PROMPT = """
+# ----------------- Prompts เฉพาะทางชลประทาน -----------------
+VISION_PROMPT = """
 คุณคือวิศวกรผู้เชี่ยวชาญด้านการตรวจสอบแบบแปลนวิศวกรรมชลประทานและโครงสร้างอาคารชลประทาน
-จงตรวจสอบแบบแปลนในภาพนี้อย่างละเอียดใน 4 มิติ:
-1. มิติโครงสร้าง (Dimensions & Scale): ตัวเลขระยะ ความสูง ความกว้าง ขัดแย้งหรือไม่
-2. หลักวิศวกรรมชลประทาน (Hydraulics & Levels): ระดับน้ำ (ร.น.ส., ร.ม.ส.), ทิศทางการไหล, สโลป, สันฝาย, บานระบาย, ท่อลอด, ทรบ.
-3. โครงสร้างและวัสดุ: ระยะเหล็ก, รอยต่อ, สัญลักษณ์
-4. คำผิด/คำตกหล่น (ภาษาไทยและอังกฤษ)
+จงวิเคราะห์ภาพแบบแปลนนี้อย่างละเอียดใน 3 มิติทางกายภาพ:
+1. มิติโครงสร้าง (Dimensions & Scale): ตัวเลขระยะ ความสูง ความกว้าง ขัดแย้งกันเองหรือไม่ เช่น ระยะรวมไม่ตรงกับระยะย่อย, สเกลผิดสัดส่วน
+2. หลักวิศวกรรมชลประทาน (Hydraulics & Levels):
+   - ทิศทางการไหล (Flow Direction) สอดคล้องกับระดับความลาดชัน (Slope) หรือไม่
+   - ระดับน้ำสำคัญ: ร.น.ส. (ระดับน้ำส่งน้ำ), ร.ม.ส. (ระดับน้ำสูงสุด), ระดับสันฝาย, ระดับก้นคลอง สอดคล้องตามหลักชลศาสตร์หรือไม่
+   - ตำแหน่งและมิติอาคารชลประทาน เช่น ประตูระบายน้ำ, ทรบ., ท่อลอด, ทางระบายน้ำล้น (Spillway), บ่อดักตะกอน
+3. สัญลักษณ์และโครงสร้าง: ระยะเหล็กเสริม, รอยต่อขยายตัว (Expansion Joint), ความหนาของคอนกรีตดาดคลอง
 
-ตอบกลับเป็น JSON Array เท่านั้น ในรูปแบบ:
+ส่งคำตอบเป็น JSON Array เท่านั้น:
 [
   {
     "box_2d": [ymin, xmin, ymax, xmax],
     "type": "error" หรือ "observation",
-    "title": "หัวข้อจุดที่พบ",
-    "description": "คำอธิบายข้อผิดพลาดหรือข้อสังเกตเชิงวิศวกรรม"
+    "title": "หัวข้อปัญหาชลศาสตร์/โครงสร้าง",
+    "description": "คำอธิบายเชิงวิศวกรรมอย่างละเอียด"
   }
 ]
 * หมายเหตุ: box_2d ต้องเป็นพิกัดสัดส่วน 0 ถึง 1000
 """
 
-def analyze_with_fallback(client, primary_model, contents, config, fallback_model="gemini-3.5-flash-lite"):
-    """ระบบตรวจพร้อม Auto-Retry และ Fallback"""
-    models_to_try = [primary_model]
-    if fallback_model and fallback_model != primary_model:
-        models_to_try.append(fallback_model)
+TEXT_SPELLCHECK_PROMPT = """
+คุณคือผู้เชี่ยวชาญด้านการตรวจทานคำผิด (Proofreader) ในแบบแปลนวิศวกรรมชลประทาน
+ตรวจสอบรายการข้อความที่ดึงมาจากแบบแปลนต่อไปนี้เพื่อหา "คำผิดภาษาไทย คำสะกดผิด คำตกหล่น หรือสระวรรณยุกต์วางผิดตำแหน่ง":
+ตัวอย่างคำศัพท์ที่ถูกต้องในงานชลประทาน:
+- คอนกรีต, คอนกรีตเสริมเหล็ก (ค.ส.ล.), คอนกรีตหยาบ
+- ระดับก้นคลอง, ระดับสันคันคลอง, ระดับสันฝาย, ประตูระบายน้ำ
+- ท่อระบายน้ำปากคลอง (ทรบ.), ท่อระบายน้ำลอด (ทรล.)
+- ความลาดเอียง (Slope), ทางลาด, หินเรียงยาแนว, ดินถมบดอัดแน่น
 
-    last_error = None
-    for model_name in models_to_try:
-        for _ in range(2):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    config=config
-                )
-                text_resp = response.text.strip()
-                if text_resp.startswith("```json"):
-                    text_resp = text_resp[7:]
-                if text_resp.endswith("```"):
-                    text_resp = text_resp[:-3]
-                return json.loads(text_resp.strip()), model_name
-            except Exception as e:
-                last_error = e
-                err_msg = str(e)
-                if "503" in err_msg or "UNAVAILABLE" in err_msg:
-                    time.sleep(3)
-                    continue
-                if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                    break
-    raise last_error
+ข้อความจากแบบแปลน (พร้อม ID และพิกัด):
+{extracted_text_json}
+
+จงตอบกลับเฉพาะรายการที่มีคำผิด เป็น JSON Array เท่านั้น ในรูปแบบ:
+[
+  {
+    "id": หมายเลข ID ของคำที่ผิด,
+    "wrong_word": "คำที่เขียนผิด",
+    "correct_word": "คำที่ถูกต้อง",
+    "description": "อธิบายว่าผิดอย่างไร"
+  }
+]
+หากไม่พบคำผิด ให้ตอบ []
+"""
+
+# ----------------- ฟังก์ชันดึง Text Layer จาก PDF -----------------
+def extract_words_with_bbox(page, page_width, page_height):
+    """ดึงตัวหนังสือภาษาไทยทั้งหมดจาก PDF พร้อมคำนวณพิกัดสัดส่วน 0-1000"""
+    words_data = []
+    # word format: (x0, y0, x1, y1, word, block_no, line_no, word_no)
+    words = page.get_text("words")
+    for idx, w in enumerate(words):
+        x0, y0, x1, y1, word_text = w[0], w[1], w[2], w[3], w[4]
+        if len(word_text.strip()) > 1: # กรองอักขระเดี่ยวทิ้ง
+            words_data.append({
+                "id": idx,
+                "text": word_text.strip(),
+                "box_2d": [
+                    int((y0 / page_height) * 1000),
+                    int((x0 / page_width) * 1000),
+                    int((y1 / page_height) * 1000),
+                    int((x1 / page_width) * 1000)
+                ]
+            })
+    return words_data
+
+def call_gemini(client, model, contents, is_json=True):
+    """เรียกใช้งาน Gemini พร้อมระบบทำความสะอาด JSON Output"""
+    for _ in range(2):
+        try:
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json" if is_json else None,
+                temperature=0.1 # ใช้ค่าต่ำเพื่อลดความคลาดเคลื่อน
+            )
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config
+            )
+            text_resp = response.text.strip()
+            if text_resp.startswith("```json"):
+                text_resp = text_resp[7:]
+            if text_resp.endswith("```"):
+                text_resp = text_resp[:-3]
+            return json.loads(text_resp.strip()) if is_json else text_resp
+        except Exception:
+            time.sleep(2)
+    return []
 
 def annotate_image(image: Image.Image, findings: list) -> Image.Image:
-    """วาดกรอบสีแดง/ส้มและป้ายกำกับภาษาไทยลงบนแบบแปลน"""
     draw_img = image.copy().convert("RGB")
     draw = ImageDraw.Draw(draw_img)
     w, h = draw_img.size
@@ -166,43 +188,42 @@ def annotate_image(image: Image.Image, findings: list) -> Image.Image:
             right = (xmax / 1000) * w
             bottom = (ymax / 1000) * h
 
-            is_error = item.get("type") == "error"
-            color = "#DC2626" if is_error else "#EA580C"
+            item_type = item.get("type", "observation")
+            if item_type == "typo":
+                color = "#9333EA" # สีม่วงสำหรับคำผิด
+                label_type = "คำผิด"
+            elif item_type == "error":
+                color = "#DC2626" # สีแดงสำหรับจุดผิดร้ายแรง
+                label_type = "วิศวกรรม"
+            else:
+                color = "#EA580C" # สีส้มสำหรับข้อสังเกต
+                label_type = "ข้อสังเกต"
 
-            # วาดกรอบสี่เหลี่ยมรอบจุดผิด
-            draw.rectangle([left, top, right, bottom], outline=color, width=5)
-            
-            # ป้ายข้อความกำกับภาษาไทย
-            label_type = "ผิดพลาด" if is_error else "ข้อสังเกต"
+            draw.rectangle([left, top, right, bottom], outline=color, width=4)
             tag = f"#{idx} [{label_type}] {item.get('title', '')}"
-            
-            # วัดขนาดป้ายตามตัวอักษรจริง
             tag_w = draw.textlength(tag, font=font_badge) + 16
-            tag_h = 30
-            draw.rectangle([left, max(0, top - tag_h), left + tag_w, top], fill=color)
-            draw.text((left + 8, max(0, top - tag_h + 2)), tag, font=font_badge, fill="white")
+            draw.rectangle([left, max(0, top - 28), left + tag_w, top], fill=color)
+            draw.text((left + 8, max(0, top - 26)), tag, font=font_badge, fill="white")
 
     return draw_img
 
 def create_report_pdf_pages(filename: str, all_findings: list) -> list:
-    """สร้างหน้ารายงานสรุปคอมเมนต์ภาษาไทย (กระดาษ A4) แนบต่อท้าย PDF"""
-    A4_W, A4_H = 1240, 1754  # 150 DPI
+    A4_W, A4_H = 1240, 1754
     report_images = []
     
     font_header = load_thai_font(30)
     font_sub = load_thai_font(20)
     font_sheet = load_thai_font(24)
     font_badge = load_thai_font(20)
-    font_desc = load_thai_font(20)
+    font_desc = load_thai_font(18)
 
     current_img = Image.new("RGB", (A4_W, A4_H), color="white")
     draw = ImageDraw.Draw(current_img)
     y_cursor = 60
 
-    # Header ส่วนหัวรายงาน
     draw.rectangle([50, 40, A4_W - 50, 150], fill="#1E3A8A")
-    draw.text((80, 55), "รายงานผลการตรวจสอบแบบแปลนวิศวกรรมชลประทาน", font=font_header, fill="white")
-    draw.text((80, 105), f"ชื่อไฟล์: {filename}   |   วันที่ตรวจสอบ: {datetime.now().strftime('%d/%m/%Y %H:%M')}", font=font_sub, fill="#BFDBFE")
+    draw.text((80, 55), "รายงานผลการตรวจสอบแบบแปลนวิศวกรรมชลประทานอย่างละเอียด", font=font_header, fill="white")
+    draw.text((80, 105), f"ไฟล์: {filename}  |  วันที่: {datetime.now().strftime('%d/%m/%Y %H:%M')}", font=font_sub, fill="#BFDBFE")
     y_cursor = 180
 
     for page_idx, findings in enumerate(all_findings, start=1):
@@ -212,13 +233,12 @@ def create_report_pdf_pages(filename: str, all_findings: list) -> list:
             draw = ImageDraw.Draw(current_img)
             y_cursor = 60
 
-        # แถบหัวข้อหน้า
         draw.rectangle([50, y_cursor, A4_W - 50, y_cursor + 45], fill="#F1F5F9")
-        draw.text((70, y_cursor + 8), f"📄 แบบแปลนหน้าที่ {page_idx} (พบข้อสังเกต {len(findings)} รายการ)", font=font_sheet, fill="#0F172A")
+        draw.text((70, y_cursor + 8), f"📄 แบบแปลนหน้าที่ {page_idx} (พบข้อบกพร่อง/ข้อสังเกต {len(findings)} รายการ)", font=font_sheet, fill="#0F172A")
         y_cursor += 60
 
         if not findings:
-            draw.text((80, y_cursor), "🟢 ไม่พบข้อผิดพลาดหรือข้อสังเกตที่ชัดเจนในหน้านี้", font=font_desc, fill="#16A34A")
+            draw.text((80, y_cursor), "🟢 ไม่พบข้อผิดพลาดหรือข้อสังเกตในหน้านี้", font=font_desc, fill="#16A34A")
             y_cursor += 45
             continue
 
@@ -229,22 +249,28 @@ def create_report_pdf_pages(filename: str, all_findings: list) -> list:
                 draw = ImageDraw.Draw(current_img)
                 y_cursor = 60
 
-            is_err = item.get("type") == "error"
-            tag_color = "#DC2626" if is_err else "#EA580C"
-            tag_title = f"#{idx} [{'จุดผิดพลาด' if is_err else 'ข้อสังเกต'}] {item.get('title', '')}"
+            item_type = item.get("type", "observation")
+            if item_type == "typo":
+                tag_color = "#9333EA"
+                type_name = "คำผิดภาษาไทย"
+            elif item_type == "error":
+                tag_color = "#DC2626"
+                type_name = "ข้อผิดพลาดโครงสร้าง"
+            else:
+                tag_color = "#EA580C"
+                type_name = "ข้อสังเกตชลศาสตร์"
 
-            # หัวข้อรายการ
+            tag_title = f"#{idx} [{type_name}] {item.get('title', '')}"
             draw.rectangle([70, y_cursor, 90, y_cursor + 24], fill=tag_color)
             draw.text((105, y_cursor - 2), tag_title, font=font_badge, fill=tag_color)
-            y_cursor += 32
+            y_cursor += 30
 
-            # รายละเอียดคำอธิบาย ตัดคำภาษาไทยตามความกว้าง
             desc = f"รายละเอียด: {item.get('description', '')}"
             wrapped_lines = wrap_text_thai(desc, font_desc, max_width=A4_W - 200, draw=draw)
             for line in wrapped_lines:
                 draw.text((105, y_cursor), line, font=font_desc, fill="#334155")
-                y_cursor += 28
-            y_cursor += 15
+                y_cursor += 26
+            y_cursor += 12
 
         y_cursor += 20
 
@@ -253,24 +279,26 @@ def create_report_pdf_pages(filename: str, all_findings: list) -> list:
 
 # ----------------- ส่วน UI การอัปโหลด -----------------
 uploaded_file = st.file_uploader(
-    "📁 อัปโหลดแบบแปลน (รองรับ PDF, JPG, PNG, TIFF):", 
+    "📁 อัปโหลดแบบแปลน (แนะนำ PDF สำหรับระบบสแกนคำผิดอัตโนมัติ):", 
     type=["pdf", "jpg", "jpeg", "png", "tiff"]
 )
 
-if uploaded_file and st.button("🚀 เริ่มการตรวจสอบ (Start Audit)"):
+if uploaded_file and st.button("🚀 เริ่มการตรวจสอบแบบละเอียด (Start Precision Audit)"):
     file_bytes = uploaded_file.read()
     raw_pages = []
+    is_pdf = uploaded_file.name.lower().endswith(".pdf")
+    pdf_doc = fitz.open(stream=file_bytes, filetype="pdf") if is_pdf else None
 
-    with st.spinner("กำลังแปลงไฟล์เอกสารเป็นรูปภาพ..."):
-        if uploaded_file.name.lower().endswith(".pdf"):
-            doc = fitz.open(stream=file_bytes, filetype="pdf")
-            for page in doc:
-                pix = page.get_pixmap(dpi=150)
+    with st.spinner("กำลังแปลงไฟล์เอกสารด้วยความละเอียดสูง (200 DPI)..."):
+        if is_pdf:
+            for page in pdf_doc:
+                # ปรับเป็น 200 DPI เพื่อความคมชัดสูงสุดในการอ่านระดับและมิติ
+                pix = page.get_pixmap(dpi=200)
                 raw_pages.append(Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB"))
         else:
             raw_pages.append(Image.open(io.BytesIO(file_bytes)).convert("RGB"))
 
-    st.info(f"ตรวจพบทั้งหมด {len(raw_pages)} หน้า กำลังส่งให้ AI ทำการตรวจสอบ...")
+    st.info(f"ตรวจพบ {len(raw_pages)} หน้า กำลังเริ่มการสแกน 2 ขั้นตอน (ตรวจคำผิดจาก Text Layer + ตรวจวิศวกรรมด้วย Vision)...")
 
     annotated_pages = []
     all_findings = []
@@ -279,37 +307,62 @@ if uploaded_file and st.button("🚀 เริ่มการตรวจสอ�
     status_text = st.empty()
 
     for idx, page_img in enumerate(raw_pages):
-        status_text.text(f"⏳ กำลังตรวจสอบหน้าที่ {idx + 1}/{len(raw_pages)}...")
-        
-        img_buffer = io.BytesIO()
-        page_img.save(img_buffer, format="JPEG", quality=85)
-        
-        findings = []
-        try:
-            findings, used_model = analyze_with_fallback(
-                client=client,
-                primary_model=selected_model,
-                contents=[
-                    types.Part.from_bytes(data=img_buffer.getvalue(), mime_type="image/jpeg"),
-                    PROMPT
-                ],
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-        except Exception as e:
-            st.warning(f"⚠️ หน้าที่ {idx + 1} ไม่สามารถตรวจได้: {e}")
-            findings = []
+        page_findings = []
 
-        annotated_img = annotate_image(page_img, findings)
+        # ----------------- ขั้นตอนที่ 1: ตรวจสอบคำผิดภาษาไทย (Text Layer) -----------------
+        if is_pdf and pdf_doc:
+            pdf_page = pdf_doc[idx]
+            page_rect = pdf_page.rect
+            extracted_words = extract_words_with_bbox(pdf_page, page_rect.width, page_rect.height)
+            
+            if extracted_words:
+                status_text.text(f"🔍 หน้าที่ {idx + 1}: กำลังตรวจทานตัวสะกดภาษาไทยจากเลเยอร์ข้อความ...")
+                # สรุปเฉพาะข้อความส่งให้ AI
+                words_payload = json.dumps([{"id": w["id"], "text": w["text"]} for w in extracted_words[:300]], ensure_ascii=False)
+                typo_prompt = TEXT_SPELLCHECK_PROMPT.format(extracted_text_json=words_payload)
+                
+                typo_results = call_gemini(client, selected_model, [typo_prompt])
+                
+                # นำคำผิดที่ AI พบกลับมาจับคู่กับ Bounding Box พิกัดจริง
+                words_map = {w["id"]: w["box_2d"] for w in extracted_words}
+                for typo in typo_results:
+                    w_id = typo.get("id")
+                    if w_id in words_map:
+                        page_findings.append({
+                            "box_2d": words_map[w_id],
+                            "type": "typo",
+                            "title": f"คำผิด: '{typo.get('wrong_word')}'",
+                            "description": f"คำที่เขียนผิดคือ '{typo.get('wrong_word')}' ควรแก้เป็น '{typo.get('correct_word')}' ({typo.get('description')})"
+                        })
+
+        # ----------------- ขั้นตอนที่ 2: ตรวจสอบวิศวกรรม/ชลศาสตร์ (Vision) -----------------
+        status_text.text(f"🔍 หน้าที่ {idx + 1}: กำลังตรวจสอบมิติและโครงสร้างชลศาสตร์...")
+        img_buffer = io.BytesIO()
+        page_img.save(img_buffer, format="JPEG", quality=95) # เพิ่มคุณภาพรูป
+
+        vision_results = call_gemini(
+            client=client,
+            model=selected_model,
+            contents=[
+                types.Part.from_bytes(data=img_buffer.getvalue(), mime_type="image/jpeg"),
+                VISION_PROMPT
+            ]
+        )
+        if isinstance(vision_results, list):
+            page_findings.extend(vision_results)
+
+        # วาดผลลัพธ์ลงบนภาพ
+        annotated_img = annotate_image(page_img, page_findings)
         annotated_pages.append(annotated_img)
-        all_findings.append(findings)
+        all_findings.append(page_findings)
 
         progress_bar.progress((idx + 1) / len(raw_pages))
-        time.sleep(2.0)
+        time.sleep(1.5)
 
     status_text.empty()
-    st.success("✅ ตรวจสอบแบบแปลนและจัดทำรายงานเสร็จสิ้นเรียบร้อยแล้ว!")
+    st.success("✅ ตรวจสอบแบบแปลนครบทุกมิติเสร็จสมบูรณ์!")
 
-    # รวมหน้าแบบแปลน + หน้ารายงานภาษาไทย เข้าด้วยกันเป็นไฟล์ PDF เดียว
+    # รวมไฟล์ PDF ผลการตรวจสอบ
     report_pages = create_report_pdf_pages(uploaded_file.name, all_findings)
     final_combined_pdf_pages = annotated_pages + report_pages
 
@@ -325,9 +378,9 @@ if uploaded_file and st.button("🚀 เริ่มการตรวจสอ�
 
         st.subheader("📥 ดาวน์โหลดเอกสารฉบับสมบูรณ์")
         st.download_button(
-            label="📄 ดาวน์โหลดผลการตรวจสอบ (แบบแปลนวงจุดผิด + ใบรายงานภาษาไทยใน PDF เดียว)",
+            label="📄 ดาวน์โหลดผลการตรวจสอบ (แบบแปลนวงจุดผิด + รายงานภาษาไทยใน PDF เดียว)",
             data=output_pdf,
-            file_name=f"Full_Audit_Report_{uploaded_file.name}.pdf",
+            file_name=f"Detailed_Audit_{uploaded_file.name}.pdf",
             mime="application/pdf",
             type="primary",
             use_container_width=True
@@ -335,19 +388,25 @@ if uploaded_file and st.button("🚀 เริ่มการตรวจสอ�
 
     st.divider()
 
-    # แสดงพรีวิวหน้าเว็บ
-    st.subheader("📋 รายละเอียดผลการตรวจสอบแต่ละหน้า")
+    # แสดงผลลัพธ์พรีวิว
+    st.subheader("📋 สรุปผลการตรวจสอบแต่ละหน้า")
     for i, (ann_img, page_finds) in enumerate(zip(annotated_pages, all_findings)):
-        with st.expander(f"📄 แบบแปลนหน้าที่ {i + 1} (พบ {len(page_finds)} รายการ)", expanded=(i == 0)):
+        with st.expander(f"📄 แบบแปลนหน้าที่ {i + 1} (พบข้อบกพร่อง/คำผิด {len(page_finds)} รายการ)", expanded=(i == 0)):
             col1, col2 = st.columns([3, 2])
             with col1:
                 st.image(ann_img, use_container_width=True, caption=f"ภาพแบบแปลนหน้าที่ {i + 1}")
             with col2:
-                st.markdown("#### ข้อคิดเห็นทางวิศวกรรม:")
+                st.markdown("#### รายการที่ตรวจพบ:")
                 if not page_finds:
-                    st.write("🟢 ไม่พบข้อผิดพลาดที่ชัดเจนในหน้านี้")
+                    st.write("🟢 ไม่พบข้อผิดพลาดในหน้านี้")
                 for f_idx, item in enumerate(page_finds, start=1):
-                    badge = "🔴 ผิดพลาด (Error)" if item.get("type") == "error" else "🟠 ข้อสังเกต (Observation)"
+                    item_type = item.get("type")
+                    if item_type == "typo":
+                        badge = "🟣 คำผิดภาษาไทย"
+                    elif item_type == "error":
+                        badge = "🔴 ผิดพลาด (วิศวกรรม)"
+                    else:
+                        badge = "🟠 ข้อสังเกต (ชลศาสตร์)"
                     st.markdown(f"**#{f_idx} [{badge}] {item.get('title')}**")
                     st.write(item.get("description"))
                     st.divider()
