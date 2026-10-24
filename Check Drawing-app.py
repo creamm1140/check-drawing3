@@ -14,25 +14,25 @@ from google.genai import types
 
 # ----------------- ตั้งค่าหน้าเว็บ -----------------
 st.set_page_config(
-    page_title="AI ตรวจแบบแปลนวิศวกรรมชลประทาน (Deterministic Engine)",
+    page_title="AI ตรวจแบบแปลนวิศวกรรมชลประทาน",
     page_icon="🚜",
     layout="wide"
 )
 
 st.title("🚜 AI ตรวจสอบแบบแปลนวิศวกรรมชลประทาน (ระบบความเสถียรสูง)")
-st.caption("Single-Pass Multimodal + Structured Outputs ล็อกผลลัพธ์ให้นิ่ง ไม่หลุดโควตา")
+st.caption("ระบบตรวจจับมิติ, ชลศาสตร์, โครงสร้าง และคำผิดภาษาไทย (รวมผลทุกอย่างในไฟล์ PDF เดียว)")
 
 # ----------------- กำหนด Schema บังคับโครงสร้าง JSON -----------------
 class FindingItem(BaseModel):
     box_2d: List[int] = Field(description="พิกัด [ymin, xmin, ymax, xmax] สัดส่วน 0 ถึง 1000")
-    type: Literal["error", "observation", "typo"] = Field(description="ประเภท: error (วิศวกรรม), observation (ข้อสังเกต), typo (คำผิด)")
-    title: str = Field(description="หัวข้อจุดบกพร่องสั้นๆ กระชับ")
+    type: Literal["error", "observation", "typo"] = Field(description="error (วิศวกรรม), observation (ข้อสังเกต), typo (คำผิดภาษาไทย)")
+    title: str = Field(description="หัวข้อจุดบกพร่องสั้นๆ")
     description: str = Field(description="คำอธิบายเชิงวิศวกรรมอย่างละเอียด")
 
 class PageAuditResult(BaseModel):
     findings: List[FindingItem] = Field(default_factory=list)
 
-# ----------------- ระบบฟอนต์ภาษาไทย -----------------
+# ----------------- ระบบโหลดฟอนต์ภาษาไทย -----------------
 FONT_URL = "https://github.com/google/fonts/raw/main/ofl/sarabun/Sarabun-Regular.ttf"
 FONT_PATH = "Sarabun-Regular.ttf"
 
@@ -57,6 +57,7 @@ def load_thai_font(size: int = 20):
     return ImageFont.load_default()
 
 def wrap_text_thai(text: str, font, max_width: int, draw: ImageDraw.Draw) -> list:
+    """ฟังก์ชันตัดบรรทัดภาษาไทยคำนวณตามความกว้างพิกเซลจริง"""
     lines = []
     current_line = ""
     for char in text:
@@ -70,55 +71,99 @@ def wrap_text_thai(text: str, font, max_width: int, draw: ImageDraw.Draw) -> lis
         lines.append(current_line)
     return lines
 
-# ----------------- Sidebar -----------------
+# ----------------- Sidebar (รองรับหลาย API Key) -----------------
 with st.sidebar:
     st.header("⚙️ การตั้งค่าระบบ")
     default_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
-    api_key = st.text_input("Gemini API Key:", value=default_key, type="password")
+    api_keys_raw = st.text_area(
+        "Gemini API Key(s):",
+        value=default_key,
+        help="ใส่ได้หลายคีย์ คั่นด้วยเครื่องหมายจุลภาค (,) หรือขึ้นบรรทัดใหม่ เพื่อสลับคีย์อัตโนมัติเมื่อโควตาเต็ม"
+    )
+    api_keys = [k.strip() for k in api_keys_raw.replace("\n", ",").split(",") if k.strip()]
+
     selected_model = st.selectbox(
-        "เลือกรุ่นโมเดล AI:",
+        "เลือกรุ่นโมเดลหลัก:",
         ["gemini-3.8-flash", "gemini-3.5-flash-lite"],
         index=0
     )
     st.markdown("[👉 รับ API Key ฟรีที่ Google AI Studio](https://aistudio.google.com/)")
 
-if not api_key:
+if not api_keys:
     st.warning("⚠️ กรุณากรอก Gemini API Key ในแถบด้านซ้ายก่อนเริ่มใช้งาน")
     st.stop()
 
-try:
-    client = genai.Client(api_key=api_key)
-except Exception as e:
-    st.error(f"เกิดข้อผิดพลาดในการเชื่อมต่อ Gemini API: {e}")
-    st.stop()
-
-# ----------------- Prompt ตรวจสอบรวม (Single-Pass) -----------------
+# ----------------- Prompt ตรวจสอบรวม -----------------
 MASTER_PROMPT = """
 คุณคือหัวหน้าวิศวกรผู้เชี่ยวชาญด้านการตรวจสอบแบบแปลนวิศวกรรมชลประทาน (กรมชลประทาน)
 จงตรวจสอบแบบแปลนในภาพนี้ พร้อมข้อความ Text Layer ที่แนบมาอย่างละเอียดที่สุดในทุกมิติ:
 
 1. ข้อผิดพลาดทางวิศวกรรมโครงสร้างและมิติ (type: "error"):
-   - ข้อมูลขัดแย้งระหว่าง Title Block กับรายการประกอบแบบ (เช่น หมู่บ้าน, ตำบล, อำเภอ)
+   - ข้อมูลขัดแย้งระหว่าง Title Block กับรายการประกอบแบบ (เช่น ชื่อหมู่บ้าน ตำบล อำเภอ)
    - ตัวเลขมิติรวมไม่ตรงกับมิติย่อย, ความกว้างช่องระบายน้ำขัดแย้งกับขนาดตอม่อ/เสากลาง
    - ระดับน้ำขัดแย้งกับการไหล (Gravity Flow) เช่น ท้ายน้ำสูงกว่าเหนือน้ำ
-   - ข้อกำหนดเหล็กเสริม, ระยะทาบเหล็ก, Cutoff Trench ไม่ครบถ้วน
+   - ข้อกำหนดเหล็กเสริม, ระยะทาบเหล็ก, Cutoff Trench ไม่สอดคล้องกัน
 
 2. ข้อสังเกตและมาตรฐานการเขียนแบบ (type: "observation"):
-   - ตัวเลข/ตัวอักษรกลับทิศทาง (Inverted/Upside-down)
+   - ตัวเลขหรือตัวอักษรกลับทิศทาง (Inverted/Upside-down)
    - สัญลักษณ์ชลศาสตร์, ทิศเหนือ, มาตราส่วน (Scale)
    - ความสมมาตรของอาคารอัดน้ำเทียบกับแนวศูนย์กลาง (CL)
 
-3. คำผิด/คำตกหล่นภาษาไทย (type: "typo"):
-   - ตรวจสอบคำสะกดผิดในข้อความภาษาไทย เช่น สันฝาย, คอนกรีต, คลองดาด, ทรบ., หินเรียง
+3. คำผิด/คำสะกดผิดภาษาไทย (type: "typo"):
+   - ตรวจสอบคำผิดในข้อความภาษาไทย เช่น สันฝาย, คอนกรีต, คลองดาด, ทรบ., หินเรียง, ตะกอน
 
 ข้อความ Text Layer ที่สกัดได้จากแบบแปลนหน้านี้:
 {extracted_text}
 """
 
 def extract_text_from_page(pdf_page):
-    """สกัดข้อความทั้งหมดในหน้านั้นเพื่อส่งคู่กับรูปภาพ"""
     text = pdf_page.get_text("text")
     return text[:4000] if text else "ไม่มี Text Layer ดิจิทัล (เป็นภาพสแกน)"
+
+# ----------------- ระบบสลับโมเดล & หมุนเวียน API Key -----------------
+def execute_audit_with_fallback(api_keys_list, preferred_model, img_bytes, prompt_content):
+    models_sequence = [preferred_model]
+    alt_model = "gemini-3.5-flash-lite" if preferred_model != "gemini-3.5-flash-lite" else "gemini-3.8-flash"
+    models_sequence.append(alt_model)
+
+    last_error = ""
+
+    for key in api_keys_list:
+        client = genai.Client(api_key=key)
+        for m_name in models_sequence:
+            try:
+                response = client.models.generate_content(
+                    model=m_name,
+                    contents=[
+                        types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
+                        prompt_content
+                    ],
+                    config=types.GenerateContentConfig(
+                        temperature=0.0,
+                        response_mime_type="application/json",
+                        response_schema=PageAuditResult
+                    )
+                )
+                text_clean = response.text.strip()
+                if text_clean.startswith("```json"):
+                    text_clean = text_clean[7:]
+                if text_clean.endswith("```"):
+                    text_clean = text_clean[:-3]
+                result_obj = PageAuditResult.model_validate_json(text_clean.strip())
+                return [f.model_dump() for f in result_obj.findings], m_name
+            except Exception as e:
+                err_str = str(e)
+                last_error = err_str
+                # ถ้าติด 429 โควตาเต็ม ให้สลับโมเดล หรือสลับคีย์ทันที
+                if any(kw in err_str for kw in ["429", "RESOURCE_EXHAUSTED", "limit: 20", "Quota exceeded"]):
+                    continue
+                elif "503" in err_str or "UNAVAILABLE" in err_str:
+                    time.sleep(3)
+                    continue
+                else:
+                    break
+
+    raise Exception(last_error)
 
 def annotate_image(image: Image.Image, findings: list) -> Image.Image:
     draw_img = image.copy().convert("RGB")
@@ -137,13 +182,13 @@ def annotate_image(image: Image.Image, findings: list) -> Image.Image:
 
             item_type = item.get("type", "observation")
             if item_type == "typo":
-                color = "#9333EA"
+                color = "#9333EA"  # สีม่วง: คำผิด
                 label_type = "คำผิด"
             elif item_type == "error":
-                color = "#DC2626"
+                color = "#DC2626"  # สีแดง: จุดผิดพลาดวิศวกรรม
                 label_type = "ผิดพลาด"
             else:
-                color = "#EA580C"
+                color = "#EA580C"  # สีส้ม: ข้อสังเกตชลศาสตร์
                 label_type = "ข้อสังเกต"
 
             draw.rectangle([left, top, right, bottom], outline=color, width=5)
@@ -217,10 +262,10 @@ def create_report_pdf_pages(filename: str, all_findings: list) -> list:
     report_images.append(current_img)
     return report_images
 
-# ----------------- UI และระบบประมวลผล -----------------
+# ----------------- UI การอัปโหลดและประมวลผล -----------------
 uploaded_file = st.file_uploader("📁 อัปโหลดแบบแปลนชลประทาน (PDF, JPG, PNG):", type=["pdf", "jpg", "jpeg", "png"])
 
-if uploaded_file and st.button("🚀 เริ่มการตรวจสอบ (Deterministic Audit)"):
+if uploaded_file and st.button("🚀 เริ่มการตรวจสอบ (Start Precision Audit)"):
     file_bytes = uploaded_file.read()
     raw_pages = []
     page_texts = []
@@ -230,14 +275,14 @@ if uploaded_file and st.button("🚀 เริ่มการตรวจสอ�
         if is_pdf:
             doc = fitz.open(stream=file_bytes, filetype="pdf")
             for page in doc:
-                pix = page.get_pixmap(dpi=180) # คมชัดและไม่กิน Payload
+                pix = page.get_pixmap(dpi=180)
                 raw_pages.append(Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB"))
                 page_texts.append(extract_text_from_page(page))
         else:
             raw_pages.append(Image.open(io.BytesIO(file_bytes)).convert("RGB"))
             page_texts.append("ไม่มี Text Layer (ไฟล์รูปภาพ)")
 
-    st.info(f"ตรวจพบทั้งหมด {len(raw_pages)} หน้า เริ่มการตรวจสอบแบบ Single-Pass...")
+    st.info(f"ตรวจพบทั้งหมด {len(raw_pages)} หน้า เริ่มการตรวจสอบ...")
 
     annotated_pages = []
     all_findings = []
@@ -245,60 +290,34 @@ if uploaded_file and st.button("🚀 เริ่มการตรวจสอ�
     status_text = st.empty()
 
     for idx, (page_img, p_text) in enumerate(zip(raw_pages, page_texts)):
-        status_text.text(f"⏳ กำลังตรวจสอบหน้าที่ {idx + 1}/{len(raw_pages)} อย่างละเอียด...")
+        status_text.text(f"⏳ กำลังตรวจสอบหน้าที่ {idx + 1}/{len(raw_pages)}...")
         
         img_buffer = io.BytesIO()
         page_img.save(img_buffer, format="JPEG", quality=90)
         
         page_findings = []
-        success = False
-        error_msg = ""
+        try:
+            page_findings, used_model = execute_audit_with_fallback(
+                api_keys_list=api_keys,
+                preferred_model=selected_model,
+                img_bytes=img_buffer.getvalue(),
+                prompt_content=MASTER_PROMPT.format(extracted_text=p_text)
+            )
+        except Exception as e:
+            st.error(f"❌ หน้าที่ {idx + 1} ไม่สามารถตรวจสอบได้: {e}")
+            page_findings = []
 
-        # Auto-retry พร้อมล็อกอุณหภูมิเป็น 0.0 ( Deterministic )
-        for attempt in range(1, 4):
-            try:
-                prompt_content = MASTER_PROMPT.format(extracted_text=p_text)
-                response = client.models.generate_content(
-                    model=selected_model,
-                    contents=[
-                        types.Part.from_bytes(data=img_buffer.getvalue(), mime_type="image/jpeg"),
-                        prompt_content
-                    ],
-                    config=types.GenerateContentConfig(
-                        temperature=0.0, # บังคับผลลัพธ์ให้นิ่ง ไม่สุ่มเดา
-                        response_mime_type="application/json",
-                        response_schema=PageAuditResult # บังคับโครงสร้าง JSON 100%
-                    )
-                )
-                
-                result_obj = PageAuditResult.model_validate_json(response.text)
-                page_findings = [f.model_dump() for f in result_obj.findings]
-                success = True
-                break
-
-            except Exception as e:
-                error_msg = str(e)
-                # หากเจอ 503 หรือ 429 ให้รอแล้วสู้ต่อ
-                if any(k in error_msg for k in ["503", "429", "RESOURCE_EXHAUSTED", "UNAVAILABLE"]):
-                    time.sleep(attempt * 4) # หน่วงเวลา 4s, 8s, 12s
-                    continue
-                else:
-                    break
-
-        if not success:
-            st.error(f"❌ หน้าที่ {idx + 1} ไม่สามารถตรวจสอบได้: {error_msg}")
-        
         annotated_img = annotate_image(page_img, page_findings)
         annotated_pages.append(annotated_img)
         all_findings.append(page_findings)
 
         progress_bar.progress((idx + 1) / len(raw_pages))
-        time.sleep(3.0) # เว้นจังหวะ 3 วินาที เพื่อไม่ให้ชน Rate limit ของ Google
+        time.sleep(2.5)
 
     status_text.empty()
     st.success("✅ การตรวจสอบเสร็จสมบูรณ์!")
 
-    # รวมไฟล์ PDF
+    # รวมไฟล์ PDF (แบบแปลน + ใบรายงานสรุป)
     report_pages = create_report_pdf_pages(uploaded_file.name, all_findings)
     final_combined = annotated_pages + report_pages
 
@@ -312,11 +331,11 @@ if uploaded_file and st.button("🚀 เริ่มการตรวจสอ�
         )
         output_pdf.seek(0)
 
-        st.subheader("📥 ดาวน์โหลดรายงานฉบับสมบูรณ์")
+        st.subheader("📥 ดาวน์โหลดเอกสารฉบับสมบูรณ์")
         st.download_button(
-            label="📄 ดาวน์โหลด Full Audit PDF (แปลนวงจุดผิด + ใบสรุปผลภาษาไทย)",
+            label="📄 ดาวน์โหลด Full Audit PDF (แปลนวงจุดผิด + ใบสรุปผลภาษาไทยในไฟล์เดียว)",
             data=output_pdf,
-            file_name=f"Verified_Audit_{uploaded_file.name}.pdf",
+            file_name=f"Full_Audit_Report_{uploaded_file.name}.pdf",
             mime="application/pdf",
             type="primary",
             use_container_width=True
